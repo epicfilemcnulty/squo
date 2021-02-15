@@ -44,41 +44,55 @@ fn get_mem_info() -> String {
     )
 }
 
-fn get_disk_info(path: &str) -> String {
-    let fs = nix::sys::statvfs::statvfs(path).unwrap();
-    let bs = fs.block_size();
-    let bl_total = fs.blocks();
-    let bl_avail = fs.blocks_available();
-    format!(
-        "# TYPE squo_disk_total gauge\nsquo_disk_total{{path=\"{}\"}} {}\n# TYPE squo_disk_free gauge\nsquo_disk_free{{path=\"{}\"}} {}\n",
-        path, bl_total*bs, path, bl_avail*bs
-    )
+fn get_disk_info(disk_mounts: &str) -> String {
+    let mounts: Vec<&str> = disk_mounts.split_whitespace().collect();
+    let mut output = String::new();
+    for mount in mounts {
+        let fs = nix::sys::statvfs::statvfs(mount).unwrap();
+        let bs = fs.block_size();
+        let bl_total = fs.blocks();
+        let bl_avail = fs.blocks_available();
+        output.push_str(&format!(
+            "# TYPE squo_disk_total gauge\nsquo_disk_total{{path=\"{}\"}} {}\n# TYPE squo_disk_free gauge\nsquo_disk_free{{path=\"{}\"}} {}\n",
+            mount, bl_total*bs, mount, bl_avail*bs
+        ));
+    }
+    output
 }
 
-fn get_node_stats() -> String {
+fn get_node_stats(disk_mounts: &str) -> String {
     let stats = nix::sys::sysinfo::sysinfo().unwrap();
     let cpus = num_cpus::get();
     let (la, _, _) = stats.load_average();
     let la = la / cpus as f64;
 
     format!(
-        "# TYPE squo_load_average_1m gauge\nsquo_load_average_1m {:.3}\n{}{}{}",
+        "# TYPE squo_load_average_1m gauge\nsquo_load_average_1m {:.3}\n{}{}",
         la,
         get_mem_info(),
-        get_disk_info("/"),
-        get_disk_info("/home")
+        get_disk_info(disk_mounts),
     )
 }
 
 #[get("/metrics")]
-async fn metrics() -> impl Responder {
-    HttpResponse::Ok().body(get_node_stats())
+async fn metrics(data: web::Data<State>) -> impl Responder {
+    HttpResponse::Ok().body(get_node_stats(&data.disk_mounts))
+}
+
+struct State {
+    disk_mounts: String,
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    HttpServer::new(|| App::new().service(metrics))
-        .bind("0.0.0.0:9100")?
-        .run()
-        .await
+    HttpServer::new(|| {
+        App::new()
+            .data(State {
+                disk_mounts: std::env::var("SQUO_DISK_MOUNTS").unwrap_or(String::from("/")),
+            })
+            .service(metrics)
+    })
+    .bind("0.0.0.0:9100")?
+    .run()
+    .await
 }
