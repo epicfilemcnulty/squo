@@ -1,15 +1,15 @@
-use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{get, web, App, HttpServer};
 use std::fs;
 use std::io;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Error, ErrorKind, Result};
 
-fn file_to_vec(filename: &str) -> io::Result<Vec<String>> {
+fn file_to_vec(filename: &str) -> Result<Vec<String>> {
     let file_in = fs::File::open(filename)?;
     let file_reader = BufReader::new(file_in);
     Ok(file_reader.lines().filter_map(io::Result::ok).collect())
 }
 
-fn get_mem_info() -> String {
+fn get_mem_info() -> Result<String> {
     /*
     MemTotal:       32149948 kB
     MemFree:        17528172 kB
@@ -34,21 +34,21 @@ fn get_mem_info() -> String {
     Shmem:            185512 kB
     KReclaimable:     519400 kB
     */
-    let mem_stats = file_to_vec("/proc/meminfo").unwrap();
+    let mem_stats = file_to_vec("/proc/meminfo")?;
     let mem_total: Vec<&str> = mem_stats[0].split_whitespace().collect();
     let mem_free: Vec<&str> = mem_stats[1].split_whitespace().collect();
     let mem_available: Vec<&str> = mem_stats[2].split_whitespace().collect();
-    format!(
+    Ok(format!(
         "# TYPE squo_mem_total gauge\nsquo_mem_total {}\n# TYPE squo_mem_free gauge\nsquo_mem_free {}\n# TYPE squo_mem_available gauge\nsquo_mem_available {}\n",
         mem_total[1], mem_free[1], mem_available[1]
-    )
+    ))
 }
 
-fn get_disk_info(disk_mounts: &str) -> String {
+fn get_disk_info(disk_mounts: &str) -> Result<String> {
     let mounts: Vec<&str> = disk_mounts.split_whitespace().collect();
     let mut output = String::new();
     for mount in mounts {
-        let fs = nix::sys::statvfs::statvfs(mount).unwrap();
+        let fs = nix::sys::statvfs::statvfs(mount).map_err(|_| Error::new(ErrorKind::Other, "statfs"))?;
         let bs = fs.block_size();
         let bl_total = fs.blocks();
         let bl_avail = fs.blocks_available();
@@ -57,26 +57,25 @@ fn get_disk_info(disk_mounts: &str) -> String {
             mount, bl_total*bs, mount, bl_avail*bs
         ));
     }
-    output
+    Ok(output)
 }
 
-fn get_node_stats(disk_mounts: &str) -> String {
-    let stats = nix::sys::sysinfo::sysinfo().unwrap();
+fn get_node_stats(disk_mounts: &str) -> Result<String> {
+    let stats = nix::sys::sysinfo::sysinfo().map_err(|_| Error::new(ErrorKind::Other, "sysinfo"))?;
     let cpus = num_cpus::get();
     let (la, _, _) = stats.load_average();
     let la = la / cpus as f64;
-
-    format!(
+    Ok(format!(
         "# TYPE squo_load_average_1m gauge\nsquo_load_average_1m {:.3}\n{}{}",
         la,
-        get_mem_info(),
-        get_disk_info(disk_mounts),
-    )
+        get_mem_info()?,
+        get_disk_info(disk_mounts)?,
+    ))
 }
 
 #[get("/metrics")]
-async fn metrics(data: web::Data<State>) -> impl Responder {
-    HttpResponse::Ok().body(get_node_stats(&data.disk_mounts))
+async fn metrics(data: web::Data<State>) -> Result<String> {
+    Ok(get_node_stats(&data.disk_mounts)?)
 }
 
 struct State {
@@ -84,11 +83,11 @@ struct State {
 }
 
 #[actix_web::main]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<()> {
     HttpServer::new(|| {
         App::new()
             .data(State {
-                disk_mounts: std::env::var("SQUO_DISK_MOUNTS").unwrap_or(String::from("/")),
+                disk_mounts: std::env::var("SQUO_DISK_MOUNTS").unwrap_or_else(|_| String::from("/")),
             })
             .service(metrics)
     })

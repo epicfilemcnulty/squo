@@ -9,5 +9,6 @@ RUN cargo install --path .
 
 FROM alpine:3.13
 COPY --from=builder /usr/local/cargo/bin/squo /usr/local/bin/squo
+EXPOSE 9100/tcp
 ENTRYPOINT ["/usr/local/bin/squo"]
 
