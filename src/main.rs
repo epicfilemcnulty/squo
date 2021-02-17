@@ -3,6 +3,53 @@ use std::fs;
 use std::io;
 use std::io::{BufRead, BufReader, Error, ErrorKind, Result};
 
+enum MetricType {
+    Counter,
+    Gauge,
+    Untyped,
+}
+
+impl MetricType {
+    fn display(&self) -> &str {
+        match *self {
+            MetricType::Counter => "counter",
+            MetricType::Gauge => "gauge",
+            MetricType::Untyped => "untyped",
+        }
+    }
+}
+
+struct Metric<'a> {
+    name: &'a str,
+    ptype: MetricType,
+    values: Vec<String>,
+}
+
+impl Metric<'_> {
+    fn add(&mut self, value: &str, labels: Option<Vec<(&str, &str)>>) {
+        let mut output = String::from(self.name);
+        if labels.is_some() {
+            output.push_str("{");
+            for label in labels.unwrap() {
+                output.push_str(&format!("{}=\"{}\",", label.0, label.1));
+            }
+            output.pop(); // remove the last comma
+            output.push_str("}");
+        }
+        output.push_str(&format!(" {}", value));
+        self.values.push(output);
+    }
+
+    fn render(&self) -> String {
+        format!(
+            "# TYPE {} {}\n{}\n",
+            self.name,
+            self.ptype.display(),
+            self.values.join("\n")
+        )
+    }
+}
+
 fn file_to_vec(filename: &str) -> Result<Vec<String>> {
     let file_in = fs::File::open(filename)?;
     let file_reader = BufReader::new(file_in);
@@ -35,47 +82,98 @@ fn get_mem_info() -> Result<String> {
     KReclaimable:     519400 kB
     */
     let mem_stats = file_to_vec("/proc/meminfo")?;
-    let mem_total: Vec<&str> = mem_stats[0].split_whitespace().collect();
-    let mem_free: Vec<&str> = mem_stats[1].split_whitespace().collect();
-    let mem_available: Vec<&str> = mem_stats[2].split_whitespace().collect();
+    let mt: Vec<&str> = mem_stats[0].split_whitespace().collect();
+    let mf: Vec<&str> = mem_stats[1].split_whitespace().collect();
+    let ma: Vec<&str> = mem_stats[2].split_whitespace().collect();
+
+    let mut mem_total = Metric {
+        name: "squo_mem_total",
+        ptype: MetricType::Gauge,
+        values: Vec::new(),
+    };
+    mem_total.add(mt[1], None);
+    let mut mem_free = Metric {
+        name: "squo_mem_free",
+        ptype: MetricType::Gauge,
+        values: Vec::new(),
+    };
+    mem_free.add(mf[1], None);
+    let mut mem_available = Metric {
+        name: "squo_mem_available",
+        ptype: MetricType::Gauge,
+        values: Vec::new(),
+    };
+    mem_available.add(ma[1], None);
+
     Ok(format!(
-        "# TYPE squo_mem_total gauge\nsquo_mem_total {}\n# TYPE squo_mem_free gauge\nsquo_mem_free {}\n# TYPE squo_mem_available gauge\nsquo_mem_available {}\n",
-        mem_total[1], mem_free[1], mem_available[1]
+        "{}{}{}",
+        mem_total.render(),
+        mem_free.render(),
+        mem_available.render()
     ))
+}
+
+fn get_network_info() -> Result<String> {
+    /*
+    Inter-|   Receive                                                |  Transmit
+       2   │  face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+       3   │     lo: 1598190   16221    0    0    0     0          0         0  1598190   16221    0    0    0     0       0          0
+
+    */
+    /*
+    let mut output = String::new();
+    let network_stats = file_to_vec("/proc/net/dev")?;
+    for iface in network_stats[2..] {
+        let stats: Vec<&str> = iface.split_whitespace().collect();
+        output.push_str(&format!());
+    }*/
+    Ok("".to_string())
 }
 
 fn get_disk_info(disk_mounts: &str) -> Result<String> {
+    let mut disk_total = Metric {
+        name: "squo_disk_total",
+        ptype: MetricType::Gauge,
+        values: Vec::new(),
+    };
+    let mut disk_free = Metric {
+        name: "squo_disk_free",
+        ptype: MetricType::Gauge,
+        values: Vec::new(),
+    };
     let mounts: Vec<&str> = disk_mounts.split_whitespace().collect();
-    let mut output = String::new();
     for mount in mounts {
         let fs = nix::sys::statvfs::statvfs(mount).map_err(|_| Error::new(ErrorKind::Other, "statfs"))?;
         let bs = fs.block_size();
-        let bl_total = fs.blocks();
-        let bl_avail = fs.blocks_available();
-        output.push_str(&format!(
-            "# TYPE squo_disk_total gauge\nsquo_disk_total{{path=\"{}\"}} {}\n# TYPE squo_disk_free gauge\nsquo_disk_free{{path=\"{}\"}} {}\n",
-            mount, bl_total*bs, mount, bl_avail*bs
-        ));
+        let bl_total = fs.blocks() * bs;
+        let bl_avail = fs.blocks_available() * bs;
+        disk_total.add(&format!("{}", bl_total), Some([("path", mount)].to_vec()));
+        disk_free.add(&format!("{}", bl_avail), Some([("path", mount)].to_vec()));
     }
-    Ok(output)
+    Ok(format!("{}{}", disk_total.render(), disk_free.render()))
 }
 
-fn get_node_stats(disk_mounts: &str) -> Result<String> {
+fn get_cpu_info() -> Result<String> {
     let stats = nix::sys::sysinfo::sysinfo().map_err(|_| Error::new(ErrorKind::Other, "sysinfo"))?;
+    let mut la_1m = Metric {
+        name: "squo_load_avg_1m",
+        ptype: MetricType::Gauge,
+        values: Vec::new(),
+    };
     let cpus = num_cpus::get();
     let (la, _, _) = stats.load_average();
-    let la = la / cpus as f64;
-    Ok(format!(
-        "# TYPE squo_load_average_1m gauge\nsquo_load_average_1m {:.3}\n{}{}",
-        la,
-        get_mem_info()?,
-        get_disk_info(disk_mounts)?,
-    ))
+    la_1m.add(&format!("{:.3}", la / cpus as f64), None);
+    Ok(format!("{}", la_1m.render()))
 }
 
 #[get("/metrics")]
 async fn metrics(data: web::Data<State>) -> Result<String> {
-    Ok(get_node_stats(&data.disk_mounts)?)
+    Ok(format!(
+        "{}{}{}",
+        get_cpu_info()?,
+        get_mem_info()?,
+        get_disk_info(&data.disk_mounts)?
+    ))
 }
 
 struct State {
