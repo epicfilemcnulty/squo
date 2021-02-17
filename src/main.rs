@@ -116,18 +116,31 @@ fn get_mem_info() -> Result<String> {
 fn get_network_info() -> Result<String> {
     /*
     Inter-|   Receive                                                |  Transmit
-       2   │  face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
-       3   │     lo: 1598190   16221    0    0    0     0          0         0  1598190   16221    0    0    0     0       0          0
+     face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+       lo:| 1598190   16221    0    0    0     0          0         0  1598190   16221    0    0    0     0       0          0
 
     */
-    /*
-    let mut output = String::new();
     let network_stats = file_to_vec("/proc/net/dev")?;
-    for iface in network_stats[2..] {
-        let stats: Vec<&str> = iface.split_whitespace().collect();
-        output.push_str(&format!());
-    }*/
-    Ok("".to_string())
+    let mut bytes_sent = Metric {
+        name: "squo_network_bytes_sent",
+        ptype: MetricType::Counter,
+        values: Vec::new(),
+    };
+    let mut bytes_received = Metric {
+        name: "squo_network_bytes_received",
+        ptype: MetricType::Counter,
+        values: Vec::new(),
+    };
+    for iface in network_stats {
+        if !iface.contains("|") {
+            let stats: Vec<&str> = iface.split_whitespace().collect();
+            let mut device = stats[0].to_string();
+            device.pop(); // remove the last colon from interface name
+            bytes_sent.add(&format!("{}", stats[9]), Some([("device", device.as_str())].to_vec()));
+            bytes_received.add(&format!("{}", stats[1]), Some([("device", device.as_str())].to_vec()));
+        }
+    }
+    Ok(format!("{}{}", bytes_received.render(), bytes_sent.render()))
 }
 
 fn get_disk_info(disk_mounts: &str) -> Result<String> {
@@ -169,10 +182,11 @@ fn get_cpu_info() -> Result<String> {
 #[get("/metrics")]
 async fn metrics(data: web::Data<State>) -> Result<String> {
     Ok(format!(
-        "{}{}{}",
+        "{}{}{}{}",
         get_cpu_info()?,
         get_mem_info()?,
-        get_disk_info(&data.disk_mounts)?
+        get_disk_info(&data.disk_mounts)?,
+        get_network_info()?,
     ))
 }
 
